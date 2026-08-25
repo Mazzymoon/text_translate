@@ -1,0 +1,22 @@
+{
+  "name": "bilingual-corpus-pipeline",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "collect:zh-en": "node tools/collect-zh-en.mjs",
+    "clean:zh-en": "node tools/clean-zh-en.mjs",
+    "translate:google": "node tools/translate-google.mjs",
+    "translate:baidu": "node tools/translate-baidu.mjs",
+    "translate:tencent": "node tools/translate-tencent.mjs",
+    "quality:quarantine-tencent": "node tools/quarantine-tencent-contamination.mjs",
+    "import:translations": "node tools/import-translations.mjs",
+    "review:export": "node tools/export-review-zh-en.mjs",
+    "review:import": "node tools/import-reviews-zh-en.mjs",
+    "export:zh-en": "node tools/export-zh-en.mjs",
+    "validate:intermediate": "node tools/validate-intermediate.mjs",
+    "validate": "node tools/validate-dataset.mjs"
+  },
+  "dependencies": {
+    "cheerio": "1.1.2"
+  }
+}
