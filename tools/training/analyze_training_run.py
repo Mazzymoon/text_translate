@@ -21,7 +21,6 @@ from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parents[2]
 RESULT_FILES = (
-    "trainer_state.json",
     "run_summary.json",
     "train_results.json",
     "eval_results.json",
@@ -67,6 +66,33 @@ def read_json_if_present(path: Path, warnings: list[str]) -> dict[str, Any] | No
         warnings.append(f"Unexpected JSON structure in {path.name}: expected object")
         return None
     return value
+
+
+def find_trainer_state(run_dir: Path, warnings: list[str]) -> tuple[dict[str, Any] | None, str | None]:
+    """Locate trainer state, preferring the run root over numbered checkpoints."""
+    root_state = run_dir / "trainer_state.json"
+    if root_state.is_file():
+        return read_json_if_present(root_state, warnings), root_state.relative_to(run_dir).as_posix()
+
+    candidates: list[tuple[int, Path]] = []
+    for checkpoint_dir in run_dir.glob("checkpoint-*"):
+        if not checkpoint_dir.is_dir():
+            continue
+        suffix = checkpoint_dir.name.removeprefix("checkpoint-")
+        if not suffix.isdigit():
+            warnings.append(f"Ignoring checkpoint with non-numeric step: {checkpoint_dir.name}")
+            continue
+        state_path = checkpoint_dir / "trainer_state.json"
+        if state_path.is_file():
+            candidates.append((int(suffix), state_path))
+    if not candidates:
+        warnings.append("Missing trainer_state.json in run root and all checkpoint-* directories")
+        return None, None
+
+    _, selected = max(candidates, key=lambda item: item[0])
+    source = selected.relative_to(run_dir).as_posix()
+    warnings.append(f"Run-root trainer_state.json is absent; using {source}")
+    return read_json_if_present(selected, warnings), source
 
 
 def as_number(value: Any) -> float | None:
@@ -258,8 +284,8 @@ def main() -> int:
         raise FileNotFoundError(f"Run directory does not exist: {run_dir}")
     analysis_dir = run_dir / "analysis"
     warnings: list[str] = []
+    trainer_state, trainer_state_source = find_trainer_state(run_dir, warnings)
     files = {name: read_json_if_present(run_dir / name, warnings) for name in RESULT_FILES}
-    trainer_state = files["trainer_state.json"]
     run_summary = files["run_summary.json"]
     train_results = files["train_results.json"]
     eval_results = files["eval_results.json"]
@@ -284,7 +310,11 @@ def main() -> int:
         "schema_version": 1,
         "run_dir": str(run_dir),
         "analysis_generated_at": datetime.now(timezone.utc).isoformat(),
-        "input_files": {name: {"present": value is not None} for name, value in files.items()},
+        "input_files": {
+            "trainer_state.json": {"present": trainer_state is not None},
+            **{name: {"present": value is not None} for name, value in files.items()},
+        },
+        "trainer_state_source": trainer_state_source,
         "trainer_state_available_fields": sorted(trainer_state.keys()) if trainer_state else [],
         "trainer_log_history_entries": len(trainer_state.get("log_history", [])) if trainer_state else 0,
         "warnings": warnings,
@@ -344,6 +374,8 @@ def main() -> int:
                 f"Peak GPU memory: {display_number(summary['peak_gpu_memory_allocated_gib'])} GiB",
                 f"Total steps: {summary['total_steps'] if summary['total_steps'] is not None else 'N/A'}",
                 f"Elapsed: {display_number(summary['elapsed_seconds'], 1)} s",
+                f"Train loss points: {len(train_losses)}",
+                f"Eval loss points: {len(eval_losses)}",
                 f"Analysis: {analysis_dir}",
             ]
         )
