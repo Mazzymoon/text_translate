@@ -372,7 +372,7 @@ def main() -> int:
         num_train_epochs=float(config.get("num_train_epochs", 2)),
         max_steps=int(config.get("max_steps", -1)),
         lr_scheduler_type=str(config.get("lr_scheduler_type", "cosine")),
-        warmup_ratio=float(config.get("warmup_ratio", 0.03)),
+        warmup_steps=float(config.get("warmup_ratio", 0.03)),
         weight_decay=float(config.get("weight_decay", 0.01)),
         max_grad_norm=float(config.get("max_grad_norm", 0.3)),
         optim=str(config.get("optim", "paged_adamw_8bit")),
