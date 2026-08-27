@@ -1,5 +1,5 @@
 {
-  "model_name_or_path": "Qwen/Qwen3-8B",
+  "model_name_or_path": "/root/autodl-tmp/text_translate/models/Qwen3-8B",
   "local_files_only": true,
   "train_file": "outputs/sft_data/train.jsonl",
   "validation_file": "outputs/sft_data/validation.jsonl",
