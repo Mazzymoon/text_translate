@@ -38,6 +38,13 @@ CSV_COLUMNS = [
     "zh_char_count",
     "translation_method",
 ]
+TRACEABILITY_COLUMNS = [
+    "pair_group_id",
+    "pair_sha256",
+    "dataset_name",
+    "data_origin",
+    "provenance",
+]
 ALLOWED_METHODS = {"human", "google_mt", "llm_mt"}
 HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\U00020000-\U0002ebef]")
 THAI_RE = re.compile(r"[\u0e00-\u0e7f]")
@@ -50,6 +57,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT, help="Build report path.")
     parser.add_argument("--records-per-direction", type=int, default=10_000)
     parser.add_argument("--seed", type=int, default=20260814, help="Stable allocation seed.")
+    parser.add_argument(
+        "--include-traceability",
+        action="store_true",
+        help="Append pair/provenance columns required by the v2 corpus.",
+    )
+    parser.add_argument(
+        "--require-quality-v2",
+        action="store_true",
+        help="Reject inputs that were not accepted by the shared v2 quality rules.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate and report without writing files.")
     return parser.parse_args()
 
@@ -63,7 +80,9 @@ def count_han(text: str) -> int:
     return len(HAN_RE.findall(text))
 
 
-def load_pairs(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def load_pairs(
+    input_path: Path, *, require_quality_v2: bool = False
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not input_path.is_file():
         raise FileNotFoundError(f"Input JSONL does not exist: {input_path}")
 
@@ -77,6 +96,7 @@ def load_pairs(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         "duplicate_pairs_skipped": 0,
         "stored_hash_mismatch": 0,
         "invalid_translation_method": 0,
+        "non_v2_quality_record": 0,
         "input_domain_counts": Counter(),
         "dataset_name_counts": Counter(),
     }
@@ -121,6 +141,12 @@ def load_pairs(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                 stats["invalid_translation_method"] += 1
                 continue
 
+            if require_quality_v2 and not str(record.get("quality_rule_version", "")).startswith(
+                "zh_th_quality_v2"
+            ):
+                stats["non_v2_quality_record"] += 1
+                continue
+
             original_domain = record.get("domain")
             stats["input_domain_counts"][str(original_domain)] += 1
 
@@ -138,12 +164,22 @@ def load_pairs(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                     "translation_method": method,
                     "pair_sha256": pair_sha256,
                     "dataset_name": dataset_name,
+                    "data_origin": record.get("data_origin"),
+                    "pair_group_id": record.get("pair_group_id")
+                    or f"zh_th_pair_{record.get('normalized_pair_sha256') or pair_sha256}",
+                    "provenance": record.get("provenance") or {},
                 }
             )
     return pairs, stats
 
 
-def allocate_rows(pairs: list[dict[str, Any]], records_per_direction: int, seed: int) -> list[dict[str, str | int]]:
+def allocate_rows(
+    pairs: list[dict[str, Any]],
+    records_per_direction: int,
+    seed: int,
+    *,
+    include_traceability: bool = False,
+) -> list[dict[str, str | int]]:
     needed = records_per_direction * 2
     selected = list(pairs)
     random.Random(seed).shuffle(selected)
@@ -151,8 +187,7 @@ def allocate_rows(pairs: list[dict[str, Any]], records_per_direction: int, seed:
     rows: list[dict[str, str | int]] = []
     for index, pair in enumerate(selected):
         zh_to_th = index < records_per_direction
-        rows.append(
-            {
+        row: dict[str, str | int] = {
                 "source_lang": "zh-CN" if zh_to_th else "th",
                 "target_lang": "th" if zh_to_th else "zh-CN",
                 "source_text": pair["zh_text"] if zh_to_th else pair["th_text"],
@@ -160,15 +195,33 @@ def allocate_rows(pairs: list[dict[str, Any]], records_per_direction: int, seed:
                 "zh_char_count": pair["zh_char_count"],
                 "translation_method": pair["translation_method"],
             }
-        )
+        if include_traceability:
+            row.update(
+                {
+                    "pair_group_id": pair["pair_group_id"],
+                    "pair_sha256": pair["pair_sha256"],
+                    "dataset_name": pair.get("dataset_name") or "",
+                    "data_origin": pair.get("data_origin") or "",
+                    "provenance": json.dumps(
+                        pair.get("provenance") or {}, ensure_ascii=False, separators=(",", ":")
+                    ),
+                }
+            )
+        rows.append(row)
     return rows
 
 
-def write_csv_atomic(output_path: Path, rows: list[dict[str, str | int]]) -> None:
+def write_csv_atomic(
+    output_path: Path,
+    rows: list[dict[str, str | int]],
+    *,
+    include_traceability: bool = False,
+) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="", delete=False, dir=output_path.parent, suffix=".tmp") as handle:
         temporary_path = Path(handle.name)
-        writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="raise")
+        columns = CSV_COLUMNS + TRACEABILITY_COLUMNS if include_traceability else CSV_COLUMNS
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="raise")
         writer.writeheader()
         writer.writerows(rows)
     temporary_path.replace(output_path)
@@ -188,11 +241,20 @@ def main() -> int:
     if args.records_per_direction <= 0:
         raise ValueError("--records-per-direction must be positive")
 
-    pairs, stats = load_pairs(args.input)
+    pairs, stats = load_pairs(args.input, require_quality_v2=args.require_quality_v2)
     needed = args.records_per_direction * 2
     can_fill = len(pairs) >= needed
     export_ready = can_fill
-    selected = allocate_rows(pairs, args.records_per_direction, args.seed) if can_fill else []
+    selected = (
+        allocate_rows(
+            pairs,
+            args.records_per_direction,
+            args.seed,
+            include_traceability=args.include_traceability,
+        )
+        if can_fill
+        else []
+    )
     direction_counts = Counter(f"{row['source_lang']}->{row['target_lang']}" for row in selected)
 
     report = {
@@ -210,6 +272,8 @@ def main() -> int:
         "selected_total": len(selected),
         "selected_direction_counts": dict(direction_counts),
         "selected_translation_method_counts": dict(Counter(row["translation_method"] for row in selected)),
+        "include_traceability": args.include_traceability,
+        "csv_columns": CSV_COLUMNS + TRACEABILITY_COLUMNS if args.include_traceability else CSV_COLUMNS,
         "notes": [
             "source_text and target_text are direction-specific final CSV fields.",
             "zh_text and th_text remain only in the intermediate JSONL as direction-neutral canonical fields.",
@@ -222,12 +286,21 @@ def main() -> int:
         return 0
     if not can_fill:
         raise RuntimeError(f"Only {len(pairs)} unique usable pairs are available; {needed} are required.")
-    if len({canonical_pair_hash(str(row["source_text"]), str(row["target_text"])) for row in selected}) != len(selected):
+    selected_pair_hashes = {
+        str(row.get("pair_sha256"))
+        if row.get("pair_sha256")
+        else canonical_pair_hash(
+            str(row["source_text"] if row["source_lang"] == "zh-CN" else row["target_text"]),
+            str(row["target_text"] if row["target_lang"] == "th" else row["source_text"]),
+        )
+        for row in selected
+    }
+    if len(selected_pair_hashes) != len(selected):
         # This should not happen because source/target swapping does not alter the
         # canonical zh/th pair; it protects future changes to allocation code.
         raise RuntimeError("Internal error: selected rows are not pair-unique")
 
-    write_csv_atomic(args.output, selected)
+    write_csv_atomic(args.output, selected, include_traceability=args.include_traceability)
     write_json_atomic(args.report, report)
     print(f"Wrote {len(selected)} rows to {args.output}")
     return 0

@@ -196,6 +196,7 @@ def main() -> int:
     pair_directions: set[tuple[str, str]] = set()
     direction_counts: dict[str, dict[str, int]] = {}
     truncated_count = 0
+    accepted_quality_checks: Counter[str] = Counter()
 
     required = {
         "record_id", "original_id", "pair_group_id", "direction", "source_lang", "target_lang",
@@ -214,9 +215,16 @@ def main() -> int:
             if record["direction"] not in ALLOWED_DIRECTIONS:
                 errors.append(f"{location}: invalid direction {record['direction']!r}")
             if not normalize_for_comparison(record["source_text"]):
+                accepted_quality_checks["empty_source_text"] += 1
                 errors.append(f"{location}: empty source_text")
             if not normalize_for_comparison(record["target_text"]):
+                accepted_quality_checks["empty_target_text"] += 1
                 errors.append(f"{location}: empty target_text")
+            if normalize_for_comparison(record["source_text"]).casefold() == normalize_for_comparison(
+                record["target_text"]
+            ).casefold():
+                accepted_quality_checks["source_equals_target"] += 1
+                errors.append(f"{location}: source_text equals target_text")
             expected_pair = canonical_pair_id(
                 record["source_lang"], record["target_lang"], record["source_text"], record["target_text"]
             )
@@ -225,13 +233,17 @@ def main() -> int:
             source_ok, _ = language_quality(record["source_text"], record["source_lang"])
             target_ok, _ = language_quality(record["target_text"], record["target_lang"])
             if not source_ok:
+                accepted_quality_checks["source_language_anomaly"] += 1
                 errors.append(f"{location}: severe source language mismatch")
             if not target_ok:
+                accepted_quality_checks["target_language_anomaly"] += 1
                 errors.append(f"{location}: severe target language mismatch")
             if has_severe_repetition(record["target_text"]):
+                accepted_quality_checks["severe_target_repetition"] += 1
                 errors.append(f"{location}: accepted target still has severe repetition")
             duplicate_key = (record["pair_group_id"], record["direction"])
             if duplicate_key in pair_directions:
+                accepted_quality_checks["duplicate_pair_same_direction"] += 1
                 errors.append(f"{location}: duplicate pair in the same direction")
             pair_directions.add(duplicate_key)
             record_locations[record["record_id"]].append(split)
@@ -284,6 +296,18 @@ def main() -> int:
         "unique_record_ids": len(record_locations),
         "unique_pair_groups": len(pair_locations),
         "pair_group_leakage_count": sum(len(locations) > 1 for locations in pair_locations.values()),
+        "accepted_quality_check_counts": {
+            name: accepted_quality_checks.get(name, 0)
+            for name in (
+                "empty_source_text",
+                "empty_target_text",
+                "source_equals_target",
+                "duplicate_pair_same_direction",
+                "severe_target_repetition",
+                "source_language_anomaly",
+                "target_language_anomaly",
+            )
+        },
         "rejected_count": rejected_count,
         "tokenizer_validation_performed": tokenizer is not None,
         "truncated_count": truncated_count,
