@@ -1,9 +1,9 @@
 {
   "model_name_or_path": "/root/autodl-tmp/text_translate/models/Qwen3-8B",
   "local_files_only": true,
-  "train_file": "outputs/sft_data/train.jsonl",
-  "validation_file": "outputs/sft_data/validation.jsonl",
-  "output_dir": "outputs/qwen3_8b_qlora_pilot_p1_lr5e-5_r16",
+  "train_file": "outputs/sft_data_v2/train.jsonl",
+  "validation_file": "outputs/sft_data_v2/validation.jsonl",
+  "output_dir": "outputs/qwen3_8b_qlora_pilot_v2/p1_lr5e-5_r16",
   "seed": 20260824,
   "max_length": 1024,
   "max_train_samples": 3200,
@@ -13,7 +13,7 @@
   "per_device_train_batch_size": 2,
   "per_device_eval_batch_size": 1,
   "gradient_accumulation_steps": 8,
-  "learning_rate": 0.00005,
+  "learning_rate": 5e-05,
   "lr_scheduler_type": "cosine",
   "warmup_ratio": 0.03,
   "weight_decay": 0.01,
@@ -27,7 +27,7 @@
   "logging_steps": 1,
   "eval_steps": 50,
   "save_steps": 50,
-  "save_total_limit": 3,
+  "save_total_limit": 20,
   "dataloader_num_workers": 4,
   "tf32": true
 }

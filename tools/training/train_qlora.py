@@ -363,6 +363,29 @@ def main() -> int:
             raise RuntimeError(f"Completion-only label audit failed: {audit_report[-1]}")
     print(json.dumps({"completion_only_label_audit": audit_report}, ensure_ascii=False, indent=2))
 
+    max_steps = int(config.get("max_steps", -1))
+    warmup_ratio = float(config.get("warmup_ratio", 0.03))
+
+    if max_steps > 0:
+        warmup_steps = round(max_steps * warmup_ratio)
+    else:
+        warmup_steps = 0
+
+    print(
+        json.dumps(
+            {
+                "lr_schedule": {
+                    "max_steps": max_steps,
+                    "warmup_ratio": warmup_ratio,
+                    "warmup_steps": warmup_steps,
+                    "lr_scheduler_type": str(config.get("lr_scheduler_type", "cosine")),
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
     training_args = SFTConfig(
         output_dir=str(output_dir),
         per_device_train_batch_size=int(config.get("per_device_train_batch_size", 2)),
@@ -370,9 +393,9 @@ def main() -> int:
         gradient_accumulation_steps=int(config.get("gradient_accumulation_steps", 8)),
         learning_rate=float(config.get("learning_rate", 1e-4)),
         num_train_epochs=float(config.get("num_train_epochs", 2)),
-        max_steps=int(config.get("max_steps", -1)),
+        max_steps=max_steps,
         lr_scheduler_type=str(config.get("lr_scheduler_type", "cosine")),
-        warmup_steps=float(config.get("warmup_ratio", 0.03)),
+        warmup_steps=warmup_steps,
         weight_decay=float(config.get("weight_decay", 0.01)),
         max_grad_norm=float(config.get("max_grad_norm", 0.3)),
         optim=str(config.get("optim", "paged_adamw_8bit")),

@@ -27,7 +27,7 @@
   "logging_steps": 1,
   "eval_steps": 10,
   "save_steps": 10,
-  "save_total_limit": 3,
+  "save_total_limit": 20,
   "dataloader_num_workers": 4,
   "tf32": true
 }
