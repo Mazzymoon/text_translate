@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import sys
 from collections import Counter
@@ -81,6 +82,135 @@ REQUIRED_FIELDS = {
 }
 
 
+ASCII_LOWER_WORD_RE = re.compile(r"[a-z]{4,}")
+THAI_LATIN_UNIT_RE = re.compile(r"[\u0E00-\u0E7FA-Za-z]+")
+EMAIL_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:contact(?:\s+(?:at|:))?\s+)?"
+    r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"
+)
+URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>]+")
+IDENTIFIER_RE = re.compile(
+    r"\b(?:[A-Z]+(?:[-/]\d+)+(?:/\d+)*|\d+(?:/\d+)+)\b"
+)
+
+
+def _is_thai_character(char: str) -> bool:
+    """Return whether *char* belongs to the Unicode Thai block."""
+
+    return "\u0E00" <= char <= "\u0E7F"
+
+
+def _mask_protected_latin_spans(text: str) -> str:
+    """Mask URLs, e-mail contexts and identifiers without changing offsets."""
+
+    masked = text
+    for pattern in (URL_RE, EMAIL_CONTEXT_RE, IDENTIFIER_RE):
+        masked = pattern.sub(lambda match: " " * len(match.group(0)), masked)
+    return masked
+
+
+def _unique_in_order(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def detect_suspicious_lowercase_latin(text: str) -> list[str]:
+    """Find ordinary lowercase Latin words/runs in a Thai target.
+
+    Formal uppercase acronyms are not lowercase matches.  URL, e-mail and
+    identifier spans are masked before scanning, so their ASCII content does
+    not produce a v3 Latin rejection.
+    """
+
+    suspicious: list[str] = []
+    for unit in THAI_LATIN_UNIT_RE.findall(_mask_protected_latin_spans(text)):
+        has_thai = any(_is_thai_character(char) for char in unit)
+        if has_thai:
+            suspicious.extend(ASCII_LOWER_WORD_RE.findall(unit))
+        elif unit.isascii() and unit.isalpha() and unit.islower() and len(unit) >= 4:
+            suspicious.append(unit)
+    return _unique_in_order(suspicious)
+
+
+def detect_thai_latin_mixed_tokens(text: str) -> list[str]:
+    """Find contiguous units containing both Thai and lowercase ASCII Latin."""
+
+    mixed: list[str] = []
+    for unit in THAI_LATIN_UNIT_RE.findall(_mask_protected_latin_spans(text)):
+        if any(_is_thai_character(char) for char in unit) and any(
+            "a" <= char <= "z" for char in unit
+        ):
+            mixed.append(unit)
+    return _unique_in_order(mixed)
+
+
+def build_v3_latin_check(text: str) -> dict[str, Any]:
+    suspicious_words = detect_suspicious_lowercase_latin(text)
+    mixed_tokens = detect_thai_latin_mixed_tokens(text)
+    return {
+        "suspicious_lowercase_words": suspicious_words,
+        "thai_latin_mixed_tokens": mixed_tokens,
+        "has_suspicious_lowercase_latin": bool(suspicious_words),
+        "has_thai_latin_mixed_token": bool(mixed_tokens),
+    }
+
+
+def apply_v3_latin_rules(text: str, reasons: list[str]) -> dict[str, Any]:
+    diagnostics = build_v3_latin_check(text)
+    additions = (
+        (
+            diagnostics["has_suspicious_lowercase_latin"],
+            "thai_side_suspicious_lowercase_latin",
+        ),
+        (diagnostics["has_thai_latin_mixed_token"], "thai_latin_mixed_token"),
+    )
+    for matched, reason in additions:
+        if matched and reason not in reasons:
+            reasons.append(reason)
+    return diagnostics
+
+
+def run_latin_self_test() -> int:
+    cases = [
+        ("thai_glued_generously", "ข้อความภาษาไทยgenerously", True, True),
+        ("thai_glued_acedonia", "ประเทศไทยacedonia", True, True),
+        ("separate_osce", "ภาษาไทย OSCE ข้อความ", False, False),
+        ("separate_acronyms", "UNDP ภาษาไทย CORINE", False, False),
+        ("identifiers", "เอกสาร A/51/495 และ ISO-9001", False, False),
+        ("url", "https://example.com", False, False),
+        ("contact_email", "contact abc@example.com", False, False),
+        ("separate_market", "ข้อมูลตลาด market ภาษาไทย", True, False),
+        ("thai_glued_word", "ภาษาไทยword", True, True),
+    ]
+    results: list[dict[str, Any]] = []
+    for name, text, expected_lowercase, expected_mixed in cases:
+        reasons: list[str] = []
+        diagnostics = apply_v3_latin_rules(text, reasons)
+        apply_v3_latin_rules(text, reasons)
+        actual = (
+            diagnostics["has_suspicious_lowercase_latin"],
+            diagnostics["has_thai_latin_mixed_token"],
+        )
+        expected = (expected_lowercase, expected_mixed)
+        if actual != expected:
+            raise AssertionError(f"{name}: expected {expected}, got {actual}: {diagnostics}")
+        expected_reasons = {
+            reason
+            for enabled, reason in (
+                (expected_lowercase, "thai_side_suspicious_lowercase_latin"),
+                (expected_mixed, "thai_latin_mixed_token"),
+            )
+            if enabled
+        }
+        if set(reasons) != expected_reasons or len(reasons) != len(set(reasons)):
+            raise AssertionError(
+                f"{name}: expected reasons {sorted(expected_reasons)}, got {reasons}"
+            )
+        results.append({"case": name, "passed": True, "reasons": reasons, **diagnostics})
+    # ASCII escapes keep this model-free test printable in Windows GBK consoles.
+    print(json.dumps({"valid": True, "cases": results}, ensure_ascii=True, indent=2))
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-file", type=Path, default=DEFAULT_RAW_GENERATIONS)
@@ -90,6 +220,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--summary-file", type=Path, default=DEFAULT_AUDIT_SUMMARY)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run the model-free v3 Latin anomaly regression cases and exit.",
+    )
     return parser.parse_args()
 
 
@@ -106,6 +241,8 @@ def numeric_summary(values: list[float]) -> dict[str, float | int | None]:
 
 def main() -> int:
     args = parse_args()
+    if args.self_test:
+        return run_latin_self_test()
     input_path = resolve_path(args.input_file)
     audit_path = resolve_path(args.audit_all)
     accepted_path = resolve_path(args.accepted_file)
@@ -154,6 +291,7 @@ def main() -> int:
             reasons = list(result["reject_reasons"])
             review_reasons = list(result["review_reasons"])
             warnings = list(result["quality_flags"])
+            latin_check = apply_v3_latin_rules(result["th_text"], reasons)
             score = repeat_score(result["th_text"])
             thai_count = count_thai(result["th_text"])
             if thai_count < min_thai_chars:
@@ -214,6 +352,7 @@ def main() -> int:
                 "source_length": len(result["zh_text"]),
                 "target_length": len(result["th_text"]),
                 "thai_char_count": thai_count,
+                "v3_latin_check": latin_check,
             }
             audited = {
                 **raw,
