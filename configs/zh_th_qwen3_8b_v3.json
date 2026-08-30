@@ -1,0 +1,31 @@
+{
+  "seed": 20260830,
+  "candidate_count": 24000,
+  "final_pair_count": 20000,
+  "candidate_domain_targets": {
+    "education": 8000,
+    "technology": 8000,
+    "finance": 8000
+  },
+  "final_direction_targets": {
+    "zh-CN->th": 10000,
+    "th->zh-CN": 10000
+  },
+  "candidate_quality": {
+    "min_zh_chars": 100,
+    "max_zh_chars": 400,
+    "min_han_letter_ratio": 0.5
+  },
+  "teacher_output_quality": {
+    "min_thai_chars": 20,
+    "max_repeat_score_20": 0.5
+  },
+  "generation": {
+    "enable_thinking": false,
+    "do_sample": false,
+    "num_beams": 1,
+    "max_input_length": 1024,
+    "max_new_tokens": 768,
+    "dtype": "bfloat16"
+  }
+}
