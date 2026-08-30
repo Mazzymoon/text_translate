@@ -24,7 +24,13 @@ try:
         load_completed_candidate_ids,
         read_jsonl,
     )
-    from .generate_teacher import pending_batches, repair_trailing_partial_jsonl
+    from .generate_teacher import (
+        count_records_missing_token_metadata,
+        generated_token_statistics,
+        input_token_counts,
+        pending_batches,
+        repair_trailing_partial_jsonl,
+    )
 except ImportError:
     from common import (
         DEFAULT_CANDIDATES,
@@ -37,7 +43,13 @@ except ImportError:
         load_completed_candidate_ids,
         read_jsonl,
     )
-    from generate_teacher import pending_batches, repair_trailing_partial_jsonl
+    from generate_teacher import (
+        count_records_missing_token_metadata,
+        generated_token_statistics,
+        input_token_counts,
+        pending_batches,
+        repair_trailing_partial_jsonl,
+    )
 
 from tools.training.prepare_sft_data import canonical_pair_id as sft_canonical_pair_id
 
@@ -87,6 +99,39 @@ def mock_teacher_row(row: dict[str, object], index: int, generation: dict[str, o
 
 def main() -> int:
     args = parse_args()
+    assert input_token_counts([[0, 0, 1, 1], [1, 1, 1, 1]]) == [2, 4]
+    assert generated_token_statistics(
+        [41, 42, 151645, 151643, 151643],
+        eos_token_id=[151645, 151643],
+        max_new_tokens=5,
+    ) == (3, False)
+    assert generated_token_statistics(
+        [41, 42, 43, 44, 45],
+        eos_token_id=[151645, 151643],
+        max_new_tokens=5,
+    ) == (5, True)
+    short_stats = generated_token_statistics(
+        [51, 151643, 151643, 151643, 151643],
+        eos_token_id=[151645, 151643],
+        max_new_tokens=5,
+    )
+    long_stats = generated_token_statistics(
+        [61, 62, 63, 151645, 151643],
+        eos_token_id=[151645, 151643],
+        max_new_tokens=5,
+    )
+    assert short_stats == (2, False)
+    assert long_stats == (4, False)
+    assert generated_token_statistics(
+        [71, 151645, 151643],
+        eos_token_id=[151645, 151643],
+        max_new_tokens=3,
+    ) == (2, False)
+    assert generated_token_statistics(
+        [81, 151643, 151643],
+        eos_token_id=[151645, 151643],
+        max_new_tokens=3,
+    ) == (2, False)
     with tempfile.TemporaryDirectory(prefix="zh_th_v3_smoke_") as name:
         root = Path(name)
         source_csv = root / "zh_en.csv"
@@ -227,6 +272,7 @@ def main() -> int:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             handle.write('{"candidate_id":"interrupted')
         assert repair_trailing_partial_jsonl(resume_file)
+        assert count_records_missing_token_metadata(resume_file) == 3
         assert load_completed_candidate_ids(resume_file) == {
             row["candidate_id"] for row in first_three
         }
@@ -261,8 +307,17 @@ def main() -> int:
                 "domain_counts": {"education": 8, "technology": 8, "finance": 8},
                 "resume_partial_line_repair": True,
                 "resume_skips_completed_ids": True,
+                "resume_keeps_legacy_token_metadata_missing": True,
                 "pair_group_matches_sft_logic": True,
                 "unique_pair_group_ids": 24,
+                "token_metadata_tests": {
+                    "left_padding": True,
+                    "normal_eos": True,
+                    "max_new_tokens": True,
+                    "mixed_batch_stop_lengths": True,
+                    "eos_151645": True,
+                    "eos_151643_also_pad": True,
+                },
             }
 
     if args.full_cardinality:

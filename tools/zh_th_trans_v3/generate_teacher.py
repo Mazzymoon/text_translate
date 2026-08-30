@@ -57,6 +57,11 @@ REQUIRED_CANDIDATE_FIELDS = {
     "source_file",
     "source_row",
 }
+TOKEN_METADATA_FIELDS = {
+    "input_token_count",
+    "generated_token_count",
+    "hit_max_new_tokens",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -124,6 +129,66 @@ def serializable_token_id(value: Any) -> int | list[int] | None:
     if isinstance(value, (list, tuple)):
         return [int(item) for item in value]
     return int(value)
+
+
+def _python_int(value: Any) -> int:
+    """Convert Python/numpy/torch integer-like scalar values to ``int``."""
+
+    return int(value.item()) if hasattr(value, "item") else int(value)
+
+
+def input_token_counts(attention_mask: Any) -> list[int]:
+    """Count real prompt tokens per row, excluding batch left padding."""
+
+    counts: list[int] = []
+    for row in attention_mask:
+        total = row.sum() if hasattr(row, "sum") else sum(row)
+        counts.append(_python_int(total))
+    return counts
+
+
+def generated_token_statistics(
+    token_ids: Any,
+    *,
+    eos_token_id: Any,
+    max_new_tokens: int,
+) -> tuple[int, bool]:
+    """Return actual new-token count and whether the generation hit its limit.
+
+    ``token_ids`` must contain only the new-token section after the common
+    padded prompt width has been removed.  The first configured EOS is counted
+    as the terminating generated token; everything after it is batch padding
+    and is excluded.  This first-EOS rule remains valid when one EOS ID is also
+    the pad ID (Qwen uses 151643 for both), because post-EOS padding can only
+    occur after that first terminating ID.  With no EOS, every returned token
+    is counted and ``hit_max_new_tokens`` is true only when the configured
+    maximum was reached.
+    """
+
+    serialized_eos = serializable_token_id(eos_token_id)
+    if serialized_eos is None:
+        eos_ids: set[int] = set()
+    elif isinstance(serialized_eos, list):
+        eos_ids = set(serialized_eos)
+    else:
+        eos_ids = {serialized_eos}
+    ids = [_python_int(token_id) for token_id in token_ids]
+    for index, token_id in enumerate(ids):
+        if token_id in eos_ids:
+            return index + 1, False
+    generated_count = len(ids)
+    return generated_count, generated_count == max_new_tokens
+
+
+def count_records_missing_token_metadata(path: Path) -> int:
+    """Count legacy resume rows without inventing or backfilling token values."""
+
+    if not path.is_file():
+        return 0
+    return sum(
+        not TOKEN_METADATA_FIELDS.issubset(row)
+        for _, row in read_jsonl(path)
+    )
 
 
 def repair_trailing_partial_jsonl(path: Path) -> bool:
@@ -199,6 +264,13 @@ def main() -> int:
     if repair_trailing_partial_jsonl(output_path):
         print(f"Removed an interrupted partial final JSONL line from {output_path}")
     completed_ids = load_completed_candidate_ids(output_path)
+    legacy_without_token_metadata = count_records_missing_token_metadata(output_path)
+    if args.resume and legacy_without_token_metadata:
+        print(
+            f"Resume will keep {legacy_without_token_metadata:,} existing record(s) without "
+            "token metadata unchanged; old rows are not automatically backfilled.",
+            file=sys.stderr,
+        )
     unknown_ids = completed_ids - input_ids
     if unknown_ids:
         raise ValueError(f"Output contains candidate IDs absent from input: {len(unknown_ids)}")
@@ -299,9 +371,24 @@ def main() -> int:
             generated = model.generate(**encoded, **generation_args)
         new_tokens = generated[:, encoded["input_ids"].shape[1] :]
         translations = tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
+        prompt_token_counts = input_token_counts(encoded["attention_mask"])
+        generated_statistics = [
+            generated_token_statistics(
+                token_ids,
+                eos_token_id=eos_token_id,
+                max_new_tokens=max_new_tokens,
+            )
+            for token_ids in new_tokens
+        ]
         created_at = utc_now()
         output: list[dict[str, Any]] = []
-        for row, translation in zip(batch, translations):
+        for row, translation, input_count, (generated_count, hit_limit) in zip(
+            batch,
+            translations,
+            prompt_token_counts,
+            generated_statistics,
+            strict=True,
+        ):
             target_text = translation.strip()
             output.append(
                 {
@@ -315,6 +402,9 @@ def main() -> int:
                     "prompt_template_version": PROMPT_TEMPLATE_VERSION,
                     "prompt_template_sha256": PROMPT_TEMPLATE_SHA256,
                     "generation_config": metadata,
+                    "input_token_count": input_count,
+                    "generated_token_count": generated_count,
+                    "hit_max_new_tokens": hit_limit,
                     "generated_at": created_at,
                     "pipeline_version": PIPELINE_VERSION,
                 }
